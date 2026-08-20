@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cursor OpenAI Proxy Settings</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg0: #0f1419;
+        --bg1: #182029;
+        --ink: #e8eef4;
+        --muted: #9aabba;
+        --accent: #3d9cf0;
+        --accent-ink: #041018;
+        --line: rgba(232, 238, 244, 0.12);
+        --ok: #3ecf8e;
+        --warn: #f0b429;
+        --danger: #f07178;
+        --font: "Segoe UI", "IBM Plex Sans", sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: var(--font);
+        color: var(--ink);
+        background:
+          radial-gradient(1200px 600px at 10% -10%, rgba(61, 156, 240, 0.22), transparent 55%),
+          radial-gradient(900px 500px at 100% 0%, rgba(62, 207, 142, 0.12), transparent 50%),
+          linear-gradient(160deg, var(--bg0), var(--bg1));
+      }
+
+      main {
+        width: min(560px, calc(100% - 2rem));
+        margin: 4rem auto;
+      }
+
+      h1 {
+        margin: 0 0 0.35rem;
+        font-size: 1.75rem;
+        letter-spacing: -0.02em;
+      }
+
+      .lede {
+        margin: 0 0 1.5rem;
+        color: var(--muted);
+        line-height: 1.45;
+      }
+
+      section {
+        padding: 1.25rem 1.35rem;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: rgba(15, 20, 25, 0.55);
+        backdrop-filter: blur(8px);
+      }
+
+      label {
+        display: block;
+        margin-bottom: 0.45rem;
+        font-size: 0.9rem;
+        color: var(--muted);
+      }
+
+      input[type="password"],
+      input[type="text"] {
+        width: 100%;
+        padding: 0.8rem 0.9rem;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: rgba(0, 0, 0, 0.35);
+        color: var(--ink);
+        font: inherit;
+        outline: none;
+      }
+
+      input:focus {
+        border-color: rgba(61, 156, 240, 0.7);
+        box-shadow: 0 0 0 3px rgba(61, 156, 240, 0.18);
+      }
+
+      .row {
+        display: flex;
+        gap: 0.65rem;
+        margin-top: 0.85rem;
+      }
+
+      button {
+        appearance: none;
+        border: 0;
+        border-radius: 10px;
+        padding: 0.7rem 1rem;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      button.primary {
+        background: var(--accent);
+        color: var(--accent-ink);
+      }
+
+      button.ghost {
+        background: transparent;
+        color: var(--ink);
+        border: 1px solid var(--line);
+      }
+
+      .status {
+        margin-top: 1.1rem;
+        display: grid;
+        gap: 0.45rem;
+        font-size: 0.92rem;
+      }
+
+      .status div {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        padding: 0.45rem 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .status span:last-child {
+        color: var(--muted);
+        text-align: right;
+        word-break: break-all;
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        padding: 0.15rem 0.55rem;
+        border-radius: 999px;
+        font-size: 0.8rem;
+        font-weight: 600;
+      }
+
+      .pill.ok {
+        background: rgba(62, 207, 142, 0.15);
+        color: var(--ok);
+      }
+
+      .pill.warn {
+        background: rgba(240, 180, 41, 0.15);
+        color: var(--warn);
+      }
+
+      .msg {
+        margin-top: 0.9rem;
+        min-height: 1.2rem;
+        font-size: 0.9rem;
+      }
+
+      .msg.ok {
+        color: var(--ok);
+      }
+
+      .msg.err {
+        color: var(--danger);
+      }
+
+      code {
+        font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+        font-size: 0.85em;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Cursor OpenAI Proxy</h1>
+      <p class="lede">
+        Paste your Cursor API key. The local OpenAI-compatible API keeps running in the tray.
+      </p>
+
+      <section>
+        <label for="apiKey">Cursor API key</label>
+        <input id="apiKey" type="password" placeholder="cursor_..." autocomplete="off" />
+        <div class="row">
+          <button class="primary" id="save" type="button">Save key</button>
+          <button class="ghost" id="toggle" type="button">Show</button>
+          <button class="ghost" id="copyUrl" type="button">Copy base URL</button>
+        </div>
+
+        <div class="status" id="status">
+          <div>
+            <span>Server</span>
+            <span id="serverState">…</span>
+          </div>
+          <div>
+            <span>API key</span>
+            <span id="keyState">…</span>
+          </div>
+          <div>
+            <span>Base URL</span>
+            <span id="baseUrl">…</span>
+          </div>
+          <div>
+            <span>Default model</span>
+            <span id="defaultModel">…</span>
+          </div>
+        </div>
+        <div class="msg" id="msg"></div>
+      </section>
+    </main>
+
+    <script>
+      const apiKeyInput = document.getElementById("apiKey");
+      const msg = document.getElementById("msg");
+      const serverState = document.getElementById("serverState");
+      const keyState = document.getElementById("keyState");
+      const baseUrlEl = document.getElementById("baseUrl");
+      const defaultModelEl = document.getElementById("defaultModel");
+      let currentV1 = "";
+
+      function setMsg(text, kind) {
+        msg.textContent = text || "";
+        msg.className = "msg" + (kind ? " " + kind : "");
+      }
+
+      async function refresh() {
+        const res = await fetch("/api/config");
+        const data = await res.json();
+        currentV1 = data.v1;
+        serverState.innerHTML = '<span class="pill ok">running</span>';
+        keyState.innerHTML = data.hasApiKey
+          ? `<span class="pill ok">set · ${data.apiKeyMasked}</span>`
+          : '<span class="pill warn">missing</span>';
+        baseUrlEl.textContent = data.v1;
+        defaultModelEl.textContent = data.defaultModel;
+        if (!apiKeyInput.value && data.hasApiKey) {
+          apiKeyInput.placeholder = data.apiKeyMasked || "cursor_...";
+        }
+      }
+
+      document.getElementById("save").addEventListener("click", async () => {
+        const apiKey = apiKeyInput.value.trim();
+        if (!apiKey) {
+          setMsg("Paste an API key first.", "err");
+          return;
+        }
+        const res = await fetch("/api/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ apiKey }),
+        });
+        if (!res.ok) {
+          setMsg("Could not save API key.", "err");
+          return;
+        }
+        apiKeyInput.value = "";
+        setMsg("API key saved.", "ok");
+        await refresh();
+      });
+
+      document.getElementById("toggle").addEventListener("click", (e) => {
+        const shown = apiKeyInput.type === "text";
+        apiKeyInput.type = shown ? "password" : "text";
+        e.currentTarget.textContent = shown ? "Show" : "Hide";
+      });
+
+      document.getElementById("copyUrl").addEventListener("click", async () => {
+        if (!currentV1) return;
+        await navigator.clipboard.writeText(currentV1);
+        setMsg("Copied " + currentV1, "ok");
+      });
+
+      refresh().catch(() => {
+        serverState.innerHTML = '<span class="pill warn">unreachable</span>';
+        setMsg("Could not reach local server.", "err");
+      });
+    </script>
+  </body>
+</html>
