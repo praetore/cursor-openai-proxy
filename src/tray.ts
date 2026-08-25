@@ -95,7 +95,7 @@ export function startTray(controllers: TrayControllers) {
         },
         {
           title: "Copy base URL",
-          tooltip: "Copy OpenAI-compatible base URL",
+          tooltip: "Copy OpenAI base URL (use Bearer auth)",
           checked: false,
           enabled: true,
         },

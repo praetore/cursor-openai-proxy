@@ -1,5 +1,7 @@
-import { spawn } from "node:child_process";
-import { createInterface } from "node:readline";
+import { Agent, Cursor, CursorAgentError } from "@cursor/sdk";
+import { mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { AppConfig } from "./config.js";
 import { messagesToPrompt, type ChatMessage } from "./prompt.js";
 
@@ -9,226 +11,205 @@ export interface ChatCompletionRequest {
   stream?: boolean;
 }
 
-export interface TextDelta {
-  text: string;
-}
-
 export interface AgentRunResult {
   text: string;
   model: string;
   sessionId?: string;
 }
 
-function resolveAgentCommand(agentBin: string): {
-  command: string;
-  argsPrefix: string[];
-  shell: boolean;
-} {
+const MODELS_CACHE_TTL_MS = 5 * 60 * 1000;
+
+let modelsCache: {
+  apiKey: string;
+  ids: string[];
+  fetchedAt: number;
+} | null = null;
+
+let modelsInflight: Promise<string[]> | null = null;
+
+function workspaceDir(): string {
   if (process.platform === "win32") {
-    // .cmd shims need a shell; keep the prompt as a single argv entry.
-    const bin = agentBin.toLowerCase().endsWith(".cmd") ? agentBin : `${agentBin}.cmd`;
-    return { command: bin, argsPrefix: [], shell: true };
+    const appData = process.env.APPDATA || join(homedir(), "AppData", "Roaming");
+    return join(appData, "cursor-openai-proxy", "workspace");
   }
-  return { command: agentBin, argsPrefix: [], shell: false };
+  return join(homedir(), ".config", "cursor-openai-proxy", "workspace");
 }
 
-function buildAgentArgs(config: AppConfig, model: string, prompt: string): string[] {
-  const args = [
-    "-p",
-    "--mode",
-    "ask",
-    "--output-format",
-    "stream-json",
-    "--stream-partial-output",
-    "--trust",
-    "--model",
-    model,
-  ];
-
-  if (config.apiKey) {
-    args.push("--api-key", config.apiKey);
-  }
-
-  args.push(prompt);
-  return args;
+async function ensureWorkspace(): Promise<string> {
+  const dir = workspaceDir();
+  await mkdir(dir, { recursive: true });
+  return dir;
 }
 
-function extractAssistantDelta(event: Record<string, unknown>): string | null {
-  if (event.type !== "assistant") return null;
+function modelSelection(modelId: string): { id: string } {
+  return { id: modelId.trim() || "auto" };
+}
 
-  // Character-level streaming deltas have timestamp_ms and no model_call_id.
-  const hasTs = Object.prototype.hasOwnProperty.call(event, "timestamp_ms");
-  const hasModelCall = Object.prototype.hasOwnProperty.call(event, "model_call_id");
-  if (!hasTs || hasModelCall) return null;
+function errorMessage(error: unknown): string {
+  if (error instanceof CursorAgentError) return error.message;
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
 
-  const message = event.message as
-    | { content?: Array<{ type?: string; text?: string }> }
-    | undefined;
-  if (!message?.content) return null;
+/** Verify the API key can reach Cursor (auth + network). */
+export async function verifyCursorAuth(apiKey: string): Promise<{
+  ok: true;
+  apiKeyName: string;
+  userEmail?: string;
+}> {
+  const me = await Cursor.me({ apiKey });
+  return {
+    ok: true,
+    apiKeyName: me.apiKeyName,
+    userEmail: me.userEmail,
+  };
+}
 
-  return message.content
-    .filter((block) => block.type === "text" && block.text)
-    .map((block) => block.text as string)
-    .join("");
+async function fetchModelsFromSdk(apiKey: string): Promise<string[]> {
+  const listed = await Cursor.models.list({ apiKey });
+  const models = new Set<string>(["auto"]);
+  for (const model of listed) {
+    if (model.id) models.add(model.id);
+    for (const alias of model.aliases ?? []) {
+      if (alias) models.add(alias);
+    }
+  }
+  return [...models];
+}
+
+export async function listModels(
+  apiKey: string,
+  options?: { force?: boolean },
+): Promise<string[]> {
+  const force = options?.force === true;
+  const now = Date.now();
+  if (
+    !force &&
+    modelsCache &&
+    modelsCache.apiKey === apiKey &&
+    now - modelsCache.fetchedAt < MODELS_CACHE_TTL_MS
+  ) {
+    return modelsCache.ids;
+  }
+
+  if (!force && modelsInflight) {
+    return modelsInflight;
+  }
+
+  const pending = fetchModelsFromSdk(apiKey)
+    .then((ids) => {
+      modelsCache = { apiKey, ids, fetchedAt: Date.now() };
+      return ids;
+    })
+    .finally(() => {
+      modelsInflight = null;
+    });
+
+  modelsInflight = pending;
+  return pending;
+}
+
+export function getCachedModels(apiKey: string): string[] | null {
+  if (modelsCache && modelsCache.apiKey === apiKey) return modelsCache.ids;
+  return null;
 }
 
 export async function* runAgentStream(
-  config: AppConfig,
+  _config: AppConfig,
+  apiKey: string,
   request: ChatCompletionRequest,
 ): AsyncGenerator<{ kind: "delta"; text: string } | { kind: "done"; result: AgentRunResult }> {
-  const model = request.model?.trim() || config.defaultModel;
+  const modelId = request.model?.trim() || _config.defaultModel || "auto";
   const prompt = messagesToPrompt(request.messages);
-  const { command, argsPrefix, shell } = resolveAgentCommand(config.agentBin);
-  const args = [...argsPrefix, ...buildAgentArgs(config, model, prompt)];
+  const cwd = await ensureWorkspace();
 
-  const child = spawn(command, args, {
-    env: {
-      ...process.env,
-      CURSOR_API_KEY: config.apiKey || process.env.CURSOR_API_KEY || "",
+  await using agent = await Agent.create({
+    apiKey,
+    model: modelSelection(modelId),
+    local: {
+      cwd,
+      // Chat bridge: don't load ambient IDE/project settings.
+      settingSources: [],
     },
-    shell,
-    windowsHide: true,
-    stdio: ["ignore", "pipe", "pipe"],
   });
 
-  let stderr = "";
-  child.stderr?.setEncoding("utf8");
-  child.stderr?.on("data", (chunk: string) => {
-    stderr += chunk;
-  });
-
-  const rl = createInterface({ input: child.stdout! });
   let finalText = "";
-  let sessionId: string | undefined;
-  let sawResult = false;
+  const pendingDeltas: string[] = [];
+  let notify: (() => void) | null = null;
+
+  const run = await agent.send(prompt, {
+    model: modelSelection(modelId),
+    onDelta: ({ update }) => {
+      if (update.type === "text-delta" && update.text) {
+        pendingDeltas.push(update.text);
+        notify?.();
+      }
+    },
+  });
 
   try {
-    for await (const line of rl) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
+    const resultPromise = run.wait().finally(() => {
+      notify?.();
+    });
 
-      let event: Record<string, unknown>;
-      try {
-        event = JSON.parse(trimmed) as Record<string, unknown>;
-      } catch {
-        continue;
-      }
-
-      if (typeof event.session_id === "string") {
-        sessionId = event.session_id;
-      }
-
-      const delta = extractAssistantDelta(event);
-      if (delta) {
+    while (true) {
+      while (pendingDeltas.length > 0) {
+        const delta = pendingDeltas.shift()!;
         finalText += delta;
         yield { kind: "delta", text: delta };
-        continue;
       }
 
-      if (event.type === "result") {
-        sawResult = true;
-        if (typeof event.result === "string" && event.result.length > 0) {
-          // Prefer streamed text when available; result can duplicate aggregates.
-          if (!finalText) finalText = event.result;
+      const settled = await Promise.race([
+        resultPromise.then((result) => ({ done: true as const, result })),
+        new Promise<{ done: false }>((resolve) => {
+          notify = () => resolve({ done: false });
+        }),
+      ]);
+      notify = null;
+
+      if (settled.done) {
+        while (pendingDeltas.length > 0) {
+          const delta = pendingDeltas.shift()!;
+          finalText += delta;
+          yield { kind: "delta", text: delta };
         }
-        if (event.is_error === true) {
-          throw new Error(
-            typeof event.result === "string" && event.result
-              ? event.result
-              : "Cursor agent returned an error result",
-          );
+
+        const result = settled.result;
+        if (result.status === "error") {
+          throw new Error(result.error?.message || "Cursor agent run failed");
         }
+        if (result.result && !finalText) {
+          finalText = result.result;
+        }
+
+        yield {
+          kind: "done",
+          result: {
+            text: finalText || result.result || "",
+            model: result.model?.id || modelId,
+            sessionId: agent.agentId,
+          },
+        };
+        return;
       }
     }
-  } finally {
-    rl.close();
+  } catch (error) {
+    throw new Error(errorMessage(error));
   }
-
-  const exitCode: number = await new Promise((resolve) => {
-    if (child.exitCode !== null) {
-      resolve(child.exitCode);
-      return;
-    }
-    child.on("close", (code) => resolve(code ?? 1));
-  });
-
-  if (exitCode !== 0) {
-    const detail = stderr.trim() || `agent exited with code ${exitCode}`;
-    throw new Error(detail);
-  }
-
-  if (!sawResult && !finalText) {
-    throw new Error(stderr.trim() || "Cursor agent produced no result");
-  }
-
-  yield {
-    kind: "done",
-    result: {
-      text: finalText,
-      model,
-      sessionId,
-    },
-  };
 }
 
 export async function runAgentCompletion(
   config: AppConfig,
+  apiKey: string,
   request: ChatCompletionRequest,
 ): Promise<AgentRunResult> {
   let result: AgentRunResult | null = null;
-  for await (const event of runAgentStream(config, request)) {
+  for await (const event of runAgentStream(config, apiKey, request)) {
     if (event.kind === "done") result = event.result;
   }
   if (!result) throw new Error("Cursor agent produced no result");
   return result;
 }
 
-export async function listModels(config: AppConfig): Promise<string[]> {
-  const { command, argsPrefix, shell } = resolveAgentCommand(config.agentBin);
-  const args = [...argsPrefix, "--list-models"];
-  if (config.apiKey) {
-    args.push("--api-key", config.apiKey);
-  }
-
-  const child = spawn(command, args, {
-    env: {
-      ...process.env,
-      CURSOR_API_KEY: config.apiKey || process.env.CURSOR_API_KEY || "",
-    },
-    shell,
-    windowsHide: true,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-
-  let stdout = "";
-  let stderr = "";
-  child.stdout?.setEncoding("utf8");
-  child.stderr?.setEncoding("utf8");
-  child.stdout?.on("data", (c: string) => {
-    stdout += c;
-  });
-  child.stderr?.on("data", (c: string) => {
-    stderr += c;
-  });
-
-  const exitCode: number = await new Promise((resolve) => {
-    child.on("close", (code) => resolve(code ?? 1));
-  });
-
-  if (exitCode !== 0) {
-    throw new Error(stderr.trim() || `agent --list-models failed (${exitCode})`);
-  }
-
-  const models = new Set<string>(["auto"]);
-  for (const line of stdout.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("Available") || trimmed.startsWith("ID")) continue;
-    // Typical: "composer-2.5  Composer 2.5  ..." or bare id
-    const id = trimmed.split(/\s+/)[0];
-    if (id && /^[a-zA-Z0-9._:-]+$/.test(id) && id.toLowerCase() !== "id") {
-      models.add(id);
-    }
-  }
-
-  return [...models];
-}
+// Re-export for callers that only need the message type.
+export type { ChatMessage };

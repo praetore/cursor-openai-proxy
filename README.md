@@ -1,12 +1,11 @@
 # Cursor OpenAI Proxy
 
-Local OpenAI-compatible **chat completions** API backed by the official Cursor Agent CLI. Runs in the system tray; click the icon to paste your API key.
+Local OpenAI-compatible **chat completions** API backed by the official [Cursor TypeScript SDK](https://cursor.com/docs/sdk/typescript). Runs in the system tray.
 
 ## Prerequisites
 
-1. **Node.js 20+**
-2. **Cursor Agent CLI** on your PATH (`agent`) — see [Cursor CLI docs](https://cursor.com/docs/cli/overview)
-3. A **Cursor API key** from [Dashboard → Integrations](https://cursor.com/dashboard/integrations)
+1. **Node.js 22.13+**
+2. A **Cursor API key** from [Dashboard → API Keys](https://cursor.com/dashboard/api)
 
 ## Install & run
 
@@ -29,55 +28,55 @@ npm run build
 npm run start:bg
 ```
 
-Or from Task Scheduler / Startup folder:
+## Auth (required)
 
-```text
-node C:\path\to\cursor-openai-proxy\dist\index.js
+Every OpenAI client must send your Cursor key as a Bearer token:
+
+```http
+Authorization: Bearer cursor_...
 ```
 
-## Settings (tray)
+| Endpoint | Behavior |
+|----------|----------|
+| `GET /` or `GET /v1` | **200 only** if Bearer auth works **and** Cursor API is reachable (`Cursor.me`) |
+| `GET /v1/models` | Models from `Cursor.models.list()` (Bearer required) |
+| `POST /v1/chat/completions` | Chat via `@cursor/sdk` `Agent` (Bearer required) |
 
-1. Click the tray icon (or **Open settings**)
-2. Paste your Cursor API key and click **Save key**
-3. Use base URL: `http://127.0.0.1:4646/v1`
+Settings UI: `http://127.0.0.1:4646/ui/`
 
-Config is stored at `%APPDATA%\cursor-openai-proxy\config.json`.
+Config file: `%APPDATA%\cursor-openai-proxy\config.json`.
 
-## API
+## Client setup
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/health` | Health + whether an API key is set |
-| `GET` | `/v1/models` | Models from `agent --list-models` |
-| `POST` | `/v1/chat/completions` | Chat completion (`stream` supported) |
-| `GET` | `/openapi.json` | OpenAPI 3 document |
-| `GET` | `/ui/` | Settings UI |
+- **Base URL:** `http://127.0.0.1:4646/v1`
+- **API key:** your Cursor API key (the client sends it as `Authorization: Bearer …`)
 
 ### Example
 
 ```bash
 curl http://127.0.0.1:4646/v1/chat/completions ^
+  -H "Authorization: Bearer %CURSOR_API_KEY%" ^
   -H "Content-Type: application/json" ^
   -d "{\"model\":\"auto\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hi in one sentence.\"}]}"
 ```
 
-Point any OpenAI-compatible client at:
+Live auth check:
 
-- **Base URL:** `http://127.0.0.1:4646/v1`
-- **API key:** any non-empty value (auth is your saved Cursor key on the server)
+```bash
+curl -i http://127.0.0.1:4646/ ^
+  -H "Authorization: Bearer %CURSOR_API_KEY%"
+```
 
 ## How it works
 
-Requests are converted to a prompt and run with:
+Requests are handled with `@cursor/sdk`:
 
-```bash
-agent -p --mode ask --output-format stream-json --stream-partial-output --model <model> --api-key <key> "<prompt>"
-```
-
-Ask mode keeps this bridge chat-oriented (no file edits by default).
+- Auth probe → `Cursor.me({ apiKey })`
+- Models → `Cursor.models.list({ apiKey })`
+- Chat → `Agent.create` + `agent.send` (local runtime, isolated workspace under the config dir)
 
 ## Notes
 
-- This uses the **official Cursor Agent CLI**, not private IDE endpoints.
 - Host/port changes in config require a restart.
 - Default listen address: `127.0.0.1:4646`
+- SDK usage follows the same Cursor billing / privacy rules as IDE and Cloud Agents.

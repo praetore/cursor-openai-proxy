@@ -60,6 +60,10 @@
         backdrop-filter: blur(8px);
       }
 
+      section + section {
+        margin-top: 1rem;
+      }
+
       label {
         display: block;
         margin-bottom: 0.45rem;
@@ -68,7 +72,8 @@
       }
 
       input[type="password"],
-      input[type="text"] {
+      input[type="text"],
+      select {
         width: 100%;
         padding: 0.8rem 0.9rem;
         border: 1px solid var(--line);
@@ -79,13 +84,15 @@
         outline: none;
       }
 
-      input:focus {
+      input:focus,
+      select:focus {
         border-color: rgba(61, 156, 240, 0.7);
         box-shadow: 0 0 0 3px rgba(61, 156, 240, 0.18);
       }
 
       .row {
         display: flex;
+        flex-wrap: wrap;
         gap: 0.65rem;
         margin-top: 0.85rem;
       }
@@ -109,6 +116,11 @@
         background: transparent;
         color: var(--ink);
         border: 1px solid var(--line);
+      }
+
+      button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
       }
 
       .status {
@@ -166,6 +178,29 @@
         color: var(--danger);
       }
 
+      .hint {
+        margin: 0.75rem 0 0;
+        color: var(--muted);
+        font-size: 0.85rem;
+        line-height: 1.4;
+      }
+
+      .models {
+        margin-top: 0.85rem;
+        max-height: 220px;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 0.55rem 0.75rem;
+        font-size: 0.85rem;
+        color: var(--muted);
+      }
+
+      .models li {
+        margin: 0.2rem 0;
+        word-break: break-all;
+      }
+
       code {
         font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
         font-size: 0.85em;
@@ -176,7 +211,8 @@
     <main>
       <h1>Cursor OpenAI Proxy</h1>
       <p class="lede">
-        Paste your Cursor API key. The local OpenAI-compatible API keeps running in the tray.
+        Clients must send <code>Authorization: Bearer &lt;CURSOR_API_KEY&gt;</code>.
+        The base URL returns 200 only when that key authenticates against Cursor.
       </p>
 
       <section>
@@ -184,6 +220,7 @@
         <input id="apiKey" type="password" placeholder="cursor_..." autocomplete="off" />
         <div class="row">
           <button class="primary" id="save" type="button">Save key</button>
+          <button class="ghost" id="verify" type="button">Verify Cursor</button>
           <button class="ghost" id="toggle" type="button">Show</button>
           <button class="ghost" id="copyUrl" type="button">Copy base URL</button>
         </div>
@@ -198,6 +235,10 @@
             <span id="keyState">…</span>
           </div>
           <div>
+            <span>Cursor auth</span>
+            <span id="authState">…</span>
+          </div>
+          <div>
             <span>Base URL</span>
             <span id="baseUrl">…</span>
           </div>
@@ -207,6 +248,21 @@
           </div>
         </div>
         <div class="msg" id="msg"></div>
+        <p class="hint">
+          OpenAI base URL: <code id="hintUrl">…</code> — API key field in the client = your Cursor key (sent as Bearer).
+        </p>
+      </section>
+
+      <section>
+        <label for="modelSelect">Default model</label>
+        <select id="modelSelect" disabled>
+          <option value="">Load models after verifying…</option>
+        </select>
+        <div class="row">
+          <button class="ghost" id="refreshModels" type="button">Refresh models</button>
+          <button class="primary" id="saveModel" type="button" disabled>Save default</button>
+        </div>
+        <ul class="models" id="modelsList"></ul>
       </section>
     </main>
 
@@ -215,13 +271,25 @@
       const msg = document.getElementById("msg");
       const serverState = document.getElementById("serverState");
       const keyState = document.getElementById("keyState");
+      const authState = document.getElementById("authState");
       const baseUrlEl = document.getElementById("baseUrl");
       const defaultModelEl = document.getElementById("defaultModel");
+      const hintUrl = document.getElementById("hintUrl");
+      const modelSelect = document.getElementById("modelSelect");
+      const modelsList = document.getElementById("modelsList");
+      const saveModelBtn = document.getElementById("saveModel");
       let currentV1 = "";
+      let savedKeyHint = "";
 
       function setMsg(text, kind) {
         msg.textContent = text || "";
         msg.className = "msg" + (kind ? " " + kind : "");
+      }
+
+      function bearerHeaders() {
+        const typed = apiKeyInput.value.trim();
+        if (typed) return { Authorization: "Bearer " + typed };
+        return null;
       }
 
       async function refresh() {
@@ -233,10 +301,65 @@
           ? `<span class="pill ok">set · ${data.apiKeyMasked}</span>`
           : '<span class="pill warn">missing</span>';
         baseUrlEl.textContent = data.v1;
+        hintUrl.textContent = data.v1;
         defaultModelEl.textContent = data.defaultModel;
+        savedKeyHint = data.hasApiKey ? data.apiKeyMasked : "";
         if (!apiKeyInput.value && data.hasApiKey) {
           apiKeyInput.placeholder = data.apiKeyMasked || "cursor_...";
         }
+        authState.innerHTML = '<span class="pill warn">not checked</span>';
+      }
+
+      async function verifyLive() {
+        const headers = bearerHeaders();
+        let probe;
+        if (headers) {
+          probe = await fetch("/", { headers });
+        } else {
+          probe = await fetch("/api/verify", { method: "POST" });
+        }
+        const body = await probe.json().catch(() => ({}));
+        if (!probe.ok) {
+          authState.innerHTML = '<span class="pill warn">failed</span>';
+          setMsg(body?.error?.message || "Cursor auth failed.", "err");
+          return false;
+        }
+        authState.innerHTML = `<span class="pill ok">ok · ${body.apiKeyName || "connected"}</span>`;
+        setMsg("Cursor API auth OK.", "ok");
+        return true;
+      }
+
+      async function loadModels() {
+        let headers = bearerHeaders();
+        if (!headers) {
+          setMsg("Paste your API key in the field to load models (Bearer required).", "err");
+          return;
+        }
+        modelsList.innerHTML = "<li>Loading…</li>";
+        const res = await fetch("/v1/models?refresh=1", { headers });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          modelsList.innerHTML = "";
+          setMsg(body?.error?.message || "Could not list models.", "err");
+          return;
+        }
+        const ids = (body.data || []).map((m) => m.id);
+        modelSelect.innerHTML = "";
+        modelsList.innerHTML = "";
+        for (const id of ids) {
+          const opt = document.createElement("option");
+          opt.value = id;
+          opt.textContent = id;
+          modelSelect.appendChild(opt);
+          const li = document.createElement("li");
+          li.textContent = id;
+          modelsList.appendChild(li);
+        }
+        modelSelect.disabled = ids.length === 0;
+        saveModelBtn.disabled = ids.length === 0;
+        const current = defaultModelEl.textContent;
+        if (current && ids.includes(current)) modelSelect.value = current;
+        setMsg(`Loaded ${ids.length} models.`, "ok");
       }
 
       document.getElementById("save").addEventListener("click", async () => {
@@ -254,9 +377,35 @@
           setMsg("Could not save API key.", "err");
           return;
         }
-        apiKeyInput.value = "";
-        setMsg("API key saved.", "ok");
+        setMsg("API key saved. Verifying against Cursor…", "ok");
         await refresh();
+        const ok = await verifyLive();
+        if (ok) await loadModels();
+      });
+
+      document.getElementById("verify").addEventListener("click", async () => {
+        const ok = await verifyLive();
+        if (ok) await loadModels();
+      });
+
+      document.getElementById("refreshModels").addEventListener("click", () => {
+        loadModels().catch((e) => setMsg(String(e), "err"));
+      });
+
+      document.getElementById("saveModel").addEventListener("click", async () => {
+        const defaultModel = modelSelect.value;
+        if (!defaultModel) return;
+        const res = await fetch("/api/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ defaultModel }),
+        });
+        if (!res.ok) {
+          setMsg("Could not save default model.", "err");
+          return;
+        }
+        defaultModelEl.textContent = defaultModel;
+        setMsg("Default model saved.", "ok");
       });
 
       document.getElementById("toggle").addEventListener("click", (e) => {
