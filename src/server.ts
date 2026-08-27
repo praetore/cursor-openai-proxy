@@ -1,5 +1,6 @@
 import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
+import { appendFile, mkdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +22,47 @@ import {
 } from "./cursor-agent.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+function requestLogPath(): string {
+  return join(dirname(configPath()), "requests.log");
+}
+
+/** Human-readable request log → stdout + %APPDATA%/cursor-openai-proxy/requests.log */
+function sysout(message: string, detail?: unknown): void {
+  const line = detail === undefined ? message : `${message} ${typeof detail === "string" ? detail : JSON.stringify(detail)}`;
+  const stamped = `[${new Date().toISOString()}] ${line}`;
+  console.log(stamped);
+  void mkdir(dirname(requestLogPath()), { recursive: true })
+    .then(() => appendFile(requestLogPath(), `${stamped}\n`, "utf8"))
+    .catch(() => {
+      // ignore log file errors
+    });
+}
+
+function previewText(value: unknown, max = 240): string {
+  const text =
+    typeof value === "string"
+      ? value
+      : value == null
+        ? ""
+        : JSON.stringify(value);
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length <= max ? oneLine : `${oneLine.slice(0, max)}…`;
+}
+
+function looksLikeCommitMessage(messages: ChatCompletionRequest["messages"]): boolean {
+  const blob = messages
+    .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)))
+    .join("\n")
+    .toLowerCase();
+  return (
+    blob.includes("commit message") ||
+    blob.includes("commit msg") ||
+    blob.includes("git diff") ||
+    blob.includes("generate a commit") ||
+    /\bdiff --git\b/.test(blob)
+  );
+}
 
 export interface ServerHandle {
   config: AppConfig;
@@ -134,9 +176,20 @@ export async function startServer(initial: AppConfig): Promise<ServerHandle> {
     reply.header("Access-Control-Allow-Origin", "*");
     reply.header("Access-Control-Allow-Headers", "Authorization, Content-Type");
     reply.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    if (req.method !== "OPTIONS") {
+      sysout(`→ ${req.method} ${req.url}`, {
+        ua: req.headers["user-agent"] ?? null,
+        hasAuth: Boolean(req.headers.authorization),
+      });
+    }
     if (req.method === "OPTIONS") {
       return reply.code(204).send();
     }
+  });
+
+  app.addHook("onResponse", async (req, reply) => {
+    if (req.method === "OPTIONS") return;
+    sysout(`← ${req.method} ${req.url} ${reply.statusCode}`);
   });
 
   const requireApiKey = (
@@ -318,11 +371,13 @@ export async function startServer(initial: AppConfig): Promise<ServerHandle> {
   app.post<{ Body: ChatCompletionRequest }>("/v1/chat/completions", async (req, reply) => {
     const auth = requireApiKey(req.headers.authorization);
     if ("error" in auth) {
+      sysout("chat/completions REJECTED: missing/invalid Bearer");
       return reply.code(auth.error.status).send(auth.error.body);
     }
 
     const body = req.body;
     if (!body?.messages || !Array.isArray(body.messages) || body.messages.length === 0) {
+      sysout("chat/completions REJECTED: messages required", body);
       const err = openaiError("`messages` is required");
       return reply.code(err.status).send(err.body);
     }
@@ -330,6 +385,15 @@ export async function startServer(initial: AppConfig): Promise<ServerHandle> {
     const created = Math.floor(Date.now() / 1000);
     const id = completionId();
     const model = body.model?.trim() || config.defaultModel;
+    const commitLike = looksLikeCommitMessage(body.messages);
+    sysout(commitLike ? "*** COMMIT MESSAGE REQUEST ***" : "chat/completions", {
+      id,
+      model,
+      stream: Boolean(body.stream),
+      messages: body.messages.length,
+      roles: body.messages.map((m) => m.role),
+      preview: previewText(body.messages.map((m) => m.content).join(" | ")),
+    });
 
     if (body.stream) {
       reply.hijack();
@@ -346,8 +410,10 @@ export async function startServer(initial: AppConfig): Promise<ServerHandle> {
       };
 
       try {
+        let chars = 0;
         for await (const event of runAgentStream(config, auth.apiKey, body)) {
           if (event.kind === "delta") {
+            chars += event.text.length;
             writeEvent({
               id,
               object: "chat.completion.chunk",
@@ -378,8 +444,10 @@ export async function startServer(initial: AppConfig): Promise<ServerHandle> {
           }
         }
         reply.raw.write("data: [DONE]\n\n");
+        sysout("chat/completions stream DONE", { id, chars });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        sysout("chat/completions stream ERROR", message);
         writeEvent({
           error: {
             message,
@@ -394,6 +462,12 @@ export async function startServer(initial: AppConfig): Promise<ServerHandle> {
 
     try {
       const result = await runAgentCompletion(config, auth.apiKey, body);
+      sysout("chat/completions DONE", {
+        id,
+        model: result.model,
+        chars: result.text.length,
+        preview: previewText(result.text),
+      });
       return {
         id,
         object: "chat.completion",
@@ -417,12 +491,26 @@ export async function startServer(initial: AppConfig): Promise<ServerHandle> {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      sysout("chat/completions ERROR", message);
       const err = openaiError(message, "server_error", 500);
       return reply.code(err.status).send(err.body);
     }
   });
 
+  app.setNotFoundHandler((req, reply) => {
+    sysout(`??? UNKNOWN ROUTE ${req.method} ${req.url} (IntelliJ may be calling an unsupported path)`);
+    return reply.code(404).send({
+      error: {
+        message: `Unknown route: ${req.method} ${req.url}`,
+        type: "invalid_request_error",
+        param: null,
+        code: null,
+      },
+    });
+  });
+
   await app.listen({ host: config.host, port: config.port });
+  sysout(`Request log file: ${requestLogPath()}`);
 
   return {
     get config() {

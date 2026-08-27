@@ -34,6 +34,8 @@ async function main(): Promise<void> {
 
   console.log(`Cursor OpenAI Proxy listening on http://${server.config.host}:${server.config.port}`);
   console.log(`Settings: http://${server.config.host}:${server.config.port}/ui/`);
+  console.log("Request logging: stdout + %APPDATA%\\cursor-openai-proxy\\requests.log");
+  console.log('Press IntelliJ "Generate Commit Message" — look for "*** COMMIT MESSAGE REQUEST ***"');
   if (!server.config.apiKey) {
     console.log("No API key set yet — open settings from the tray icon.");
   }
