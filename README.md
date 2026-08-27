@@ -42,9 +42,9 @@ Authorization: Bearer cursor_...
 | `GET /v1/models` | Models from `Cursor.models.list()` (Bearer required) |
 | `POST /v1/chat/completions` | Chat via `@cursor/sdk` `Agent` (Bearer required) |
 
-Settings UI: `http://127.0.0.1:4646/ui/`
+Status UI: `http://127.0.0.1:4646/ui/`
 
-Config file: `%APPDATA%\cursor-openai-proxy\config.json`.
+Config file: `%APPDATA%\cursor-openai-proxy\config.json` (host/port only).
 
 ## Client setup
 

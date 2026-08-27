@@ -3,19 +3,15 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 export interface AppConfig {
-  apiKey: string;
   host: string;
   port: number;
   agentBin: string;
-  defaultModel: string;
 }
 
 const DEFAULTS: AppConfig = {
-  apiKey: "",
   host: "127.0.0.1",
   port: 4646,
   agentBin: "agent",
-  defaultModel: "auto",
 };
 
 function configDir(): string {
@@ -28,6 +24,10 @@ function configDir(): string {
 
 export function configPath(): string {
   return join(configDir(), "config.json");
+}
+
+export function requestLogPath(): string {
+  return join(configDir(), "requests.log");
 }
 
 export async function loadConfig(): Promise<AppConfig> {
@@ -46,12 +46,6 @@ export async function saveConfig(partial: Partial<AppConfig>): Promise<AppConfig
   await mkdir(configDir(), { recursive: true });
   await writeFile(configPath(), JSON.stringify(next, null, 2), "utf8");
   return next;
-}
-
-export function maskApiKey(apiKey: string): string {
-  if (!apiKey) return "";
-  if (apiKey.length <= 8) return "••••••••";
-  return `${apiKey.slice(0, 4)}…${apiKey.slice(-4)}`;
 }
 
 export function baseUrl(config: AppConfig): string {

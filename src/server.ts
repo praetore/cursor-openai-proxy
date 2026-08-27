@@ -1,14 +1,8 @@
-import Fastify from "fastify";
-import fastifyStatic from "@fastify/static";
-import { appendFile, mkdir } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import {
   baseUrl,
   configPath,
   loadConfig,
-  maskApiKey,
+  requestLogPath,
   saveConfig,
   type AppConfig,
 } from "./config.js";
@@ -20,16 +14,24 @@ import {
   verifyCursorAuth,
   type ChatCompletionRequest,
 } from "./cursor-agent.js";
+import open from "open";
+import { access, appendFile, mkdir, writeFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import Fastify from "fastify";
+import fastifyStatic from "@fastify/static";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-function requestLogPath(): string {
-  return join(dirname(configPath()), "requests.log");
-}
-
 /** Human-readable request log → stdout + %APPDATA%/cursor-openai-proxy/requests.log */
 function sysout(message: string, detail?: unknown): void {
-  const line = detail === undefined ? message : `${message} ${typeof detail === "string" ? detail : JSON.stringify(detail)}`;
+  const safeDetail = detail === undefined ? undefined : redactSecrets(detail);
+  const line =
+    safeDetail === undefined
+      ? message
+      : `${message} ${typeof safeDetail === "string" ? safeDetail : JSON.stringify(safeDetail)}`;
   const stamped = `[${new Date().toISOString()}] ${line}`;
   console.log(stamped);
   void mkdir(dirname(requestLogPath()), { recursive: true })
@@ -48,6 +50,28 @@ function previewText(value: unknown, max = 240): string {
         : JSON.stringify(value);
   const oneLine = text.replace(/\s+/g, " ").trim();
   return oneLine.length <= max ? oneLine : `${oneLine.slice(0, max)}…`;
+}
+
+/** Strip Bearer tokens / cursor_ keys that may appear in error strings. */
+function redactSecrets(value: unknown): unknown {
+  if (typeof value === "string") {
+    return value
+      .replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]")
+      .replace(/\bcursor_[A-Za-z0-9_-]+/g, "cursor_[REDACTED]");
+  }
+  if (Array.isArray(value)) return value.map(redactSecrets);
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (/authorization|api[_-]?key|token|secret|password/i.test(k)) {
+        out[k] = "[REDACTED]";
+      } else {
+        out[k] = redactSecrets(v);
+      }
+    }
+    return out;
+  }
+  return value;
 }
 
 function looksLikeCommitMessage(messages: ChatCompletionRequest["messages"]): boolean {
@@ -165,7 +189,8 @@ function modelsResponse(ids: string[]) {
 
 export async function startServer(initial: AppConfig): Promise<ServerHandle> {
   let config = initial;
-  const app = Fastify({ logger: true });
+  // Custom sysout handles request logs; keep Fastify quiet so Authorization is never dumped.
+  const app = Fastify({ logger: false });
 
   await app.register(fastifyStatic, {
     root: join(__dirname, "..", "public", "ui"),
@@ -176,19 +201,20 @@ export async function startServer(initial: AppConfig): Promise<ServerHandle> {
     reply.header("Access-Control-Allow-Origin", "*");
     reply.header("Access-Control-Allow-Headers", "Authorization, Content-Type");
     reply.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    if (req.method !== "OPTIONS") {
-      sysout(`→ ${req.method} ${req.url}`, {
-        ua: req.headers["user-agent"] ?? null,
-        hasAuth: Boolean(req.headers.authorization),
-      });
-    }
     if (req.method === "OPTIONS") {
       return reply.code(204).send();
     }
+    // chat/completions has its own compact logs (esp. commit-message flow)
+    if (req.url.split("?")[0] === "/v1/chat/completions") return;
+    sysout(`→ ${req.method} ${req.url}`, {
+      ua: req.headers["user-agent"] ?? null,
+      hasAuth: Boolean(req.headers.authorization),
+    });
   });
 
   app.addHook("onResponse", async (req, reply) => {
     if (req.method === "OPTIONS") return;
+    if (req.url.split("?")[0] === "/v1/chat/completions") return;
     sysout(`← ${req.method} ${req.url} ${reply.statusCode}`);
   });
 
@@ -248,56 +274,61 @@ export async function startServer(initial: AppConfig): Promise<ServerHandle> {
 
   app.get("/health", async () => ({
     ok: true,
-    hasApiKey: Boolean(config.apiKey),
     baseUrl: baseUrl(config),
     v1: `${baseUrl(config)}/v1`,
-    note: "Use GET / or GET /v1 with Authorization: Bearer <CURSOR_API_KEY> for a live Cursor auth check.",
+    note: "Use Authorization: Bearer <CURSOR_API_KEY> on /v1/* and for GET / live auth check.",
   }));
 
   app.get("/openapi.json", async () => openApiSpec(config));
 
   app.get("/api/config", async () => ({
-    hasApiKey: Boolean(config.apiKey),
-    apiKeyMasked: maskApiKey(config.apiKey),
     host: config.host,
     port: config.port,
     agentBin: config.agentBin,
-    defaultModel: config.defaultModel,
     baseUrl: baseUrl(config),
     v1: `${baseUrl(config)}/v1`,
     configPath: configPath(),
+    logPath: requestLogPath(),
   }));
+
+  app.post("/api/open-logs", async (_req, reply) => {
+    try {
+      const path = requestLogPath();
+      await mkdir(dirname(path), { recursive: true });
+      try {
+        await access(path, fsConstants.F_OK);
+      } catch {
+        await writeFile(path, "", "utf8");
+      }
+      await open(path);
+      return { ok: true, path };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return reply.code(500).send({ ok: false, error: message });
+    }
+  });
 
   app.post<{
     Body: {
-      apiKey?: string;
       host?: string;
       port?: number;
       agentBin?: string;
-      defaultModel?: string;
     };
   }>("/api/config", async (req) => {
     const body = req.body ?? {};
     const partial: Partial<AppConfig> = {};
-    if (typeof body.apiKey === "string") partial.apiKey = body.apiKey.trim();
     if (typeof body.host === "string" && body.host.trim()) partial.host = body.host.trim();
     if (typeof body.port === "number" && Number.isFinite(body.port)) partial.port = body.port;
     if (typeof body.agentBin === "string" && body.agentBin.trim()) {
       partial.agentBin = body.agentBin.trim();
     }
-    if (typeof body.defaultModel === "string" && body.defaultModel.trim()) {
-      partial.defaultModel = body.defaultModel.trim();
-    }
 
     config = await saveConfig(partial);
     return {
       ok: true,
-      hasApiKey: Boolean(config.apiKey),
-      apiKeyMasked: maskApiKey(config.apiKey),
       host: config.host,
       port: config.port,
       agentBin: config.agentBin,
-      defaultModel: config.defaultModel,
       baseUrl: baseUrl(config),
       v1: `${baseUrl(config)}/v1`,
       note:
@@ -305,26 +336,6 @@ export async function startServer(initial: AppConfig): Promise<ServerHandle> {
           ? "Host/port changes apply after restart."
           : undefined,
     };
-  });
-
-  /** Settings UI helper: verify stored key against Cursor. */
-  app.post("/api/verify", async (_req, reply) => {
-    if (!config.apiKey) {
-      const err = openaiError(
-        "API key not set. Paste your Cursor API key and save first.",
-        "authentication_error",
-        401,
-      );
-      return reply.code(err.status).send(err.body);
-    }
-    try {
-      const me = await verifyCursorAuth(config.apiKey);
-      return { ok: true, apiKeyName: me.apiKeyName, userEmail: me.userEmail ?? null };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const err = openaiError(message, "authentication_error", 401);
-      return reply.code(err.status).send(err.body);
-    }
   });
 
   const handleListModels = async (
@@ -384,16 +395,24 @@ export async function startServer(initial: AppConfig): Promise<ServerHandle> {
 
     const created = Math.floor(Date.now() / 1000);
     const id = completionId();
-    const model = body.model?.trim() || config.defaultModel;
+    const model = body.model?.trim() || "auto";
     const commitLike = looksLikeCommitMessage(body.messages);
-    sysout(commitLike ? "*** COMMIT MESSAGE REQUEST ***" : "chat/completions", {
-      id,
-      model,
-      stream: Boolean(body.stream),
-      messages: body.messages.length,
-      roles: body.messages.map((m) => m.role),
-      preview: previewText(body.messages.map((m) => m.content).join(" | ")),
-    });
+    if (commitLike) {
+      sysout("*** COMMIT MESSAGE REQUEST ***", {
+        id,
+        model,
+        stream: Boolean(body.stream),
+      });
+    } else {
+      sysout("chat/completions", {
+        id,
+        model,
+        stream: Boolean(body.stream),
+        messages: body.messages.length,
+        roles: body.messages.map((m) => m.role),
+        preview: previewText(body.messages.map((m) => m.content).join(" | ")),
+      });
+    }
 
     if (body.stream) {
       reply.hijack();
@@ -444,10 +463,16 @@ export async function startServer(initial: AppConfig): Promise<ServerHandle> {
           }
         }
         reply.raw.write("data: [DONE]\n\n");
-        sysout("chat/completions stream DONE", { id, chars });
+        sysout(
+          commitLike ? "*** COMMIT MESSAGE DONE ***" : "chat/completions stream DONE",
+          { id, chars },
+        );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        sysout("chat/completions stream ERROR", message);
+        sysout(
+          commitLike ? "*** COMMIT MESSAGE ERROR ***" : "chat/completions stream ERROR",
+          redactSecrets(message),
+        );
         writeEvent({
           error: {
             message,
@@ -462,12 +487,20 @@ export async function startServer(initial: AppConfig): Promise<ServerHandle> {
 
     try {
       const result = await runAgentCompletion(config, auth.apiKey, body);
-      sysout("chat/completions DONE", {
-        id,
-        model: result.model,
-        chars: result.text.length,
-        preview: previewText(result.text),
-      });
+      if (commitLike) {
+        sysout("*** COMMIT MESSAGE DONE ***", {
+          id,
+          model: result.model,
+          chars: result.text.length,
+        });
+      } else {
+        sysout("chat/completions DONE", {
+          id,
+          model: result.model,
+          chars: result.text.length,
+          preview: previewText(result.text),
+        });
+      }
       return {
         id,
         object: "chat.completion",
@@ -491,7 +524,10 @@ export async function startServer(initial: AppConfig): Promise<ServerHandle> {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      sysout("chat/completions ERROR", message);
+      sysout(
+        commitLike ? "*** COMMIT MESSAGE ERROR ***" : "chat/completions ERROR",
+        redactSecrets(message),
+      );
       const err = openaiError(message, "server_error", 500);
       return reply.code(err.status).send(err.body);
     }

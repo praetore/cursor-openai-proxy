@@ -11,7 +11,8 @@
     "dev": "tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "start:bg": "powershell -NoProfile -WindowStyle Hidden -Command \"Start-Process -WindowStyle Hidden node -ArgumentList 'dist/index.js' -WorkingDirectory '%CD%'\""
+    "start:bg": "powershell -NoProfile -WindowStyle Hidden -Command \"Start-Process -WindowStyle Hidden node -ArgumentList 'dist/index.js' -WorkingDirectory '%CD%'\"",
+    "package": "npm run build && node scripts/make-installer.mjs"
   },
   "engines": {
     "node": ">=22.13"

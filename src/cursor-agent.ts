@@ -119,7 +119,7 @@ export async function* runAgentStream(
   apiKey: string,
   request: ChatCompletionRequest,
 ): AsyncGenerator<{ kind: "delta"; text: string } | { kind: "done"; result: AgentRunResult }> {
-  const modelId = request.model?.trim() || _config.defaultModel || "auto";
+  const modelId = request.model?.trim() || "auto";
   const prompt = messagesToPrompt(request.messages);
   const cwd = await ensureWorkspace();
 

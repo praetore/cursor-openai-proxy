@@ -1,10 +1,11 @@
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
-import { readFileSync } from "node:fs";
+import { constants as fsConstants, readFileSync } from "node:fs";
+import { access, mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import open from "open";
-import { baseUrl, type AppConfig } from "./config.js";
+import { baseUrl, requestLogPath, type AppConfig } from "./config.js";
 
 const require = createRequire(import.meta.url);
 const SysTray = require("systray2").default as {
@@ -78,6 +79,17 @@ async function copyToClipboard(text: string): Promise<void> {
   });
 }
 
+async function openRequestLog(): Promise<void> {
+  const path = requestLogPath();
+  await mkdir(dirname(path), { recursive: true });
+  try {
+    await access(path, fsConstants.F_OK);
+  } catch {
+    await writeFile(path, "", "utf8");
+  }
+  await open(path);
+}
+
 export function startTray(controllers: TrayControllers) {
   const settingsUrl = () => `${baseUrl(controllers.getConfig())}/ui/`;
 
@@ -85,17 +97,23 @@ export function startTray(controllers: TrayControllers) {
     menu: {
       icon: iconBase64(),
       title: "Cursor OpenAI Proxy",
-      tooltip: "Cursor OpenAI Proxy – click to open settings",
+      tooltip: "Cursor OpenAI Proxy – click for status",
       items: [
         {
-          title: "Open settings",
-          tooltip: "Paste your Cursor API key",
+          title: "Open status",
+          tooltip: "Show base URL and auth info",
           checked: false,
           enabled: true,
         },
         {
           title: "Copy base URL",
           tooltip: "Copy OpenAI base URL (use Bearer auth)",
+          checked: false,
+          enabled: true,
+        },
+        {
+          title: "Open logs",
+          tooltip: "Open requests.log in the default editor",
           checked: false,
           enabled: true,
         },
@@ -113,7 +131,7 @@ export function startTray(controllers: TrayControllers) {
   });
 
   void tray.onClick(async (action) => {
-    // Left-click on icon (no item) or "Open settings"
+    // Left-click on icon (no item) or "Open status"
     if (action.item == null || action.seq_id === 0) {
       await open(settingsUrl());
       return;
@@ -129,7 +147,16 @@ export function startTray(controllers: TrayControllers) {
       return;
     }
 
-    if (action.seq_id === 3) {
+    if (action.seq_id === 2) {
+      try {
+        await openRequestLog();
+      } catch {
+        await open(settingsUrl());
+      }
+      return;
+    }
+
+    if (action.seq_id === 4) {
       await tray.kill(false);
       await controllers.onQuit();
     }
