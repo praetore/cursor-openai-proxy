@@ -47,6 +47,10 @@ jobs:
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "Using version $VER"
 
+      - name: Install Inno Setup
+        if: runner.os == 'Windows'
+        run: choco install innosetup --no-progress -y
+
       - name: Install dependencies
         run: npm ci
 
@@ -63,8 +67,9 @@ jobs:
         with:
           name: cursor-openai-proxy-${{ steps.version.outputs.version }}-${{ runner.os }}
           path: |
-            release/*.zip
-            release/*.tar.gz
+            release/*.exe
+            release/*.pkg
+            release/*.deb
           if-no-files-found: error
           retention-days: 30
 

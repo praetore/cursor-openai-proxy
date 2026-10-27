@@ -4,10 +4,26 @@ Local OpenAI-compatible **chat completions** API backed by the official [Cursor 
 
 ## Prerequisites
 
-1. **Node.js 22.13+**
+1. **Node.js 22.13+** ([nodejs.org](https://nodejs.org/))
 2. A **Cursor API key** from [Dashboard → API Keys](https://cursor.com/dashboard/api)
 
-## Install & run
+## Install (release installers)
+
+Download the latest installer from [Releases](https://github.com/praetore/cursor-openai-proxy/releases):
+
+| Platform | Asset |
+|----------|--------|
+| Windows | `cursor-openai-proxy-Setup-<version>-x64.exe` |
+| macOS | `cursor-openai-proxy-<version>-arm64.pkg` (or `x64`) |
+| Linux | `cursor-openai-proxy_<version>_amd64.deb` (or `arm64`) |
+
+**Windows:** run the Setup `.exe` (installs to `%LOCALAPPDATA%\cursor-openai-proxy`, Start Menu, optional run-at-startup). Toggle **Run at startup** later from the tray menu.
+
+**macOS:** open the `.pkg` (installs to `/usr/local/lib/cursor-openai-proxy`, launcher on PATH as `cursor-openai-proxy`). Unsigned packages may need right-click → Open.
+
+**Linux:** `sudo dpkg -i cursor-openai-proxy_*.deb` then run `cursor-openai-proxy`.
+
+## Develop from source
 
 ```bash
 npm install
@@ -27,6 +43,8 @@ Background (hidden window on Windows):
 npm run build
 npm run start:bg
 ```
+
+Build a local installer for your OS (`npm run package`). On Windows this needs [Inno Setup 6+](https://jrsoftware.org/isinfo.php).
 
 ## Auth (required)
 

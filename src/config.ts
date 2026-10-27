@@ -6,12 +6,15 @@ export interface AppConfig {
   host: string;
   port: number;
   agentBin: string;
+  /** Launch when the user signs in (OS login item / Startup folder). */
+  startAtLogin: boolean;
 }
 
 const DEFAULTS: AppConfig = {
   host: "127.0.0.1",
   port: 4646,
   agentBin: "agent",
+  startAtLogin: false,
 };
 
 function configDir(): string {

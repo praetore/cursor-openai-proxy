@@ -1,14 +1,27 @@
 #!/usr/bin/env node
-import { loadConfig } from "./config.js";
+import { loadConfig, saveConfig } from "./config.js";
+import { setAutostartEnabled, syncAutostart } from "./autostart.js";
 import { startServer } from "./server.js";
 import { startTray } from "./tray.js";
 
 async function main(): Promise<void> {
   const config = await loadConfig();
+  // Keep OS login item in sync with config (e.g. choice from Setup).
+  try {
+    await syncAutostart(config.startAtLogin);
+  } catch (err) {
+    console.error("Failed to sync start-at-login:", err);
+  }
+
   const server = await startServer(config);
 
   const tray = startTray({
     getConfig: () => server.config,
+    setStartAtLogin: async (enabled) => {
+      await saveConfig({ startAtLogin: enabled });
+      await setAutostartEnabled(enabled);
+      await server.reloadConfig();
+    },
     onQuit: async () => {
       await server.close();
       process.exit(0);

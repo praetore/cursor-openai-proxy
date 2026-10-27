@@ -25,6 +25,16 @@ const SysTray = require("systray2").default as {
     copyDir?: boolean | string;
   }): {
     onClick: (listener: (action: { item?: unknown; seq_id: number }) => void) => Promise<unknown>;
+    sendAction: (action: {
+      type: "update-item";
+      item: {
+        title: string;
+        tooltip: string;
+        checked?: boolean;
+        enabled?: boolean;
+      };
+      seq_id?: number;
+    }) => Promise<unknown>;
     kill: (exitNode?: boolean) => Promise<void>;
   };
   separator: {
@@ -37,14 +47,32 @@ const SysTray = require("systray2").default as {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+const ITEM_OPEN_STATUS = 0;
+const ITEM_COPY_URL = 1;
+const ITEM_OPEN_LOGS = 2;
+// 3 = separator
+const ITEM_START_AT_LOGIN = 4;
+// 5 = separator
+const ITEM_QUIT = 6;
+
 export interface TrayControllers {
   getConfig: () => AppConfig;
+  setStartAtLogin: (enabled: boolean) => Promise<void>;
   onQuit: () => Promise<void> | void;
 }
 
 function iconBase64(): string {
   const iconPath = join(__dirname, "..", "assets", "tray.ico");
   return readFileSync(iconPath).toString("base64");
+}
+
+function startAtLoginItem(checked: boolean) {
+  return {
+    title: "Run at startup",
+    tooltip: "Launch automatically when Windows starts",
+    checked,
+    enabled: true,
+  };
 }
 
 async function copyToClipboard(text: string): Promise<void> {
@@ -92,6 +120,7 @@ async function openRequestLog(): Promise<void> {
 
 export function startTray(controllers: TrayControllers) {
   const settingsUrl = () => `${baseUrl(controllers.getConfig())}/ui/`;
+  const loginChecked = () => Boolean(controllers.getConfig().startAtLogin);
 
   const tray = new SysTray({
     menu: {
@@ -118,6 +147,8 @@ export function startTray(controllers: TrayControllers) {
           enabled: true,
         },
         SysTray.separator,
+        startAtLoginItem(loginChecked()),
+        SysTray.separator,
         {
           title: "Quit",
           tooltip: "Stop the local API",
@@ -132,12 +163,12 @@ export function startTray(controllers: TrayControllers) {
 
   void tray.onClick(async (action) => {
     // Left-click on icon (no item) or "Open status"
-    if (action.item == null || action.seq_id === 0) {
+    if (action.item == null || action.seq_id === ITEM_OPEN_STATUS) {
       await open(settingsUrl());
       return;
     }
 
-    if (action.seq_id === 1) {
+    if (action.seq_id === ITEM_COPY_URL) {
       const url = `${baseUrl(controllers.getConfig())}/v1`;
       try {
         await copyToClipboard(url);
@@ -147,7 +178,7 @@ export function startTray(controllers: TrayControllers) {
       return;
     }
 
-    if (action.seq_id === 2) {
+    if (action.seq_id === ITEM_OPEN_LOGS) {
       try {
         await openRequestLog();
       } catch {
@@ -156,7 +187,22 @@ export function startTray(controllers: TrayControllers) {
       return;
     }
 
-    if (action.seq_id === 4) {
+    if (action.seq_id === ITEM_START_AT_LOGIN) {
+      const next = !loginChecked();
+      try {
+        await controllers.setStartAtLogin(next);
+        await tray.sendAction({
+          type: "update-item",
+          item: startAtLoginItem(next),
+          seq_id: ITEM_START_AT_LOGIN,
+        });
+      } catch (err) {
+        console.error("Failed to update start-at-login:", err);
+      }
+      return;
+    }
+
+    if (action.seq_id === ITEM_QUIT) {
       await tray.kill(false);
       await controllers.onQuit();
     }
